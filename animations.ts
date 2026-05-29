@@ -13,7 +13,8 @@
  *   /animation tool:<name>      Set tool only
  *   /animation width full|default|<n>
  *   /animation on|off|random
- *   /spinner /verbs        Spinner frames + phase-aware Claude verbs
+ *   /spinner /verbs        Spinner frames + verb selection modes
+ *   /verbs per-turn        Same verb choice for the whole AI turn
  *   /verbs thinking:claude Use verbs only for selected phase(s)
  */
 
@@ -77,6 +78,8 @@ type VerbConfig = {
 	customVerbList?: string[];
 };
 
+type VerbSelectionMode = "per-phase" | "per-turn";
+
 const ANIM_PHASES: AnimPhase[] = ["thinking", "working", "tool"];
 
 const PHASE_LABELS: Record<AnimPhase, string> = {
@@ -91,6 +94,7 @@ interface SpinnerConfig extends VerbConfig {
 	frameIntervalMs: number;
 	phaseVerbs?: Partial<Record<AnimPhase, VerbConfig>>;
 	verbRotationIntervalMs: number;
+	verbSelectionMode: VerbSelectionMode;
 	showCompletionVerb: boolean;
 	completionVerbDurationMs: number;
 }
@@ -100,6 +104,7 @@ const DEFAULT_SPINNER_CONFIG: SpinnerConfig = {
 	frameIntervalMs: 150,
 	verbs: "none",
 	verbRotationIntervalMs: 3000,
+	verbSelectionMode: "per-phase",
 	showCompletionVerb: true,
 	completionVerbDurationMs: 2000,
 };
@@ -650,12 +655,16 @@ function describeVerbConfig(config: VerbConfig): string {
 	return `${config.verbs} (${(VERB_PRESETS[config.verbs as VerbPreset] ?? []).length} verbs)`;
 }
 
+function describeVerbSelectionMode(config: SpinnerConfig): string {
+	return config.verbSelectionMode;
+}
+
 function describeVerbPreset(config: SpinnerConfig): string {
 	const overrides = ANIM_PHASES
 		.filter((phase) => config.phaseVerbs?.[phase])
 		.map((phase) => `${phase}: ${describeVerbConfig(config.phaseVerbs![phase]!)}`);
 	const suffix = overrides.length > 0 ? `  |  ${overrides.join("  |  ")}` : "";
-	return `default: ${describeVerbConfig(config)}${suffix}`;
+	return `default: ${describeVerbConfig(config)}${suffix}  |  mode: ${describeVerbSelectionMode(config)}`;
 }
 
 function hexToRgb(hex: string): [number, number, number] {
@@ -768,12 +777,13 @@ function refreshSpinnerVerbText(state: AnimState, phase: AnimPhase = getCurrentP
 	const verbs = buildVerbList(state.spinner, phase);
 	state.spinnerVerbList = verbs;
 	if (verbs.length === 0) {
-		// Do not let a phase with disabled verbs (e.g. thinking/tool:none)
-		// clear the verb selected for another phase. Pi can briefly bounce
-		// between phases while a single visible "working" operation is active;
-		// clearing here made working:claude pick a fresh verb on every bounce.
-		if (state.spinnerVerbPhase === phase) resetSpinnerVerbRotation(state);
 		return undefined;
+	}
+
+	if (state.spinner.verbSelectionMode === "per-turn") {
+		if (state.spinnerVerbText) return state.spinnerVerbText;
+		state.spinnerVerbText = randomItem(verbs);
+		return state.spinnerVerbText;
 	}
 
 	const now = Date.now();
@@ -1418,7 +1428,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("verbs", {
-		description: "Configure phase-aware spinner verbs.",
+		description: "Configure spinner verbs and selection mode.",
 		getArgumentCompletions: (prefix: string) => {
 			const presets: VerbPreset[] = ["claude", "short", "technical", "fun", "none"];
 			const phaseItems = ANIM_PHASES.flatMap((phase) => presets.map((preset) => ({
@@ -1427,6 +1437,8 @@ export default function (pi: ExtensionAPI) {
 				description: `Set ${phase} verbs to ${preset}`,
 			})));
 			const items = [
+				{ value: "per-turn", label: "per-turn", description: "Select one verb for the whole AI turn" },
+				{ value: "per-phase", label: "per-phase", description: "Select verbs per phase" },
 				{ value: "claude", label: "claude", description: "Global default: 187 verbs (full Claude Code list)" },
 				{ value: "short", label: "short", description: "Global default: 6 focused verbs" },
 				{ value: "technical", label: "technical", description: "Global default: 12 dev-focused verbs" },
@@ -1462,6 +1474,11 @@ export default function (pi: ExtensionAPI) {
 				persistConfig();
 			};
 			const presetLabel = (preset: VerbPreset) => preset === "none" ? "no verb rotation" : `${preset} (${VERB_PRESETS[preset].length} verbs)`;
+			const setMode = (mode: VerbSelectionMode) => {
+				state.spinner.verbSelectionMode = mode;
+				resetAndPersist();
+				ctx.ui.notify(`Verb mode: ${describeVerbSelectionMode(state.spinner)}`, "success");
+			};
 
 			if (!trimmed) {
 				const list = buildVerbList(state.spinner);
@@ -1476,6 +1493,15 @@ export default function (pi: ExtensionAPI) {
 
 			const parts = trimmed.split(/\s+/);
 			const sub = parts[0]!.toLowerCase();
+
+			if (sub === "per-turn") {
+				setMode("per-turn");
+				return;
+			}
+			if (sub === "per-phase") {
+				setMode("per-phase");
+				return;
+			}
 
 			if (sub === "clear") {
 				delete state.spinner.phaseVerbs;
@@ -1529,7 +1555,7 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			ctx.ui.notify(
-				"Usage: /verbs [claude|short|technical|fun|none|thinking:claude|working:none|tool:technical|clear|add v1,v2,...|replace v1,v2,...]",
+				"Usage: /verbs [per-turn|per-phase|claude|short|technical|fun|none|thinking:claude|working:none|tool:technical|clear|add v1,v2,...|replace v1,v2,...]",
 				"error",
 			);
 		},

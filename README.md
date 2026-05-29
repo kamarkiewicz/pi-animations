@@ -74,10 +74,11 @@ Everything is under `/animation`, `/spinner`, and `/verbs`:
 /animation off                      Disable animations
 /spinner ...                        Frames: claude|braille|pulse|dot|star|none
 /verbs ...                          Verb presets: claude|short|technical|fun|none
+/verbs per-turn|per-phase           Verb selection for the whole turn or per phase
 /verbs thinking:claude              Claude verbs only while thinking
 ```
 
-`/spinner` always controls the loader icon; `/verbs` is `none` by default, can show rotating Claude-style verbs when animations are off, and can supply animated labels for text animations. Verb presets can be set globally or per phase (`thinking:`, `working:`, `tool:`).
+`/spinner` always controls the loader icon; `/verbs` is `none` by default, can show rotating Claude-style verbs when animations are off, and can supply animated labels for text animations. Verb presets can be set globally or per phase (`thinking:`, `working:`, `tool:`). Use `/verbs per-turn` to keep one verb for the whole AI turn, or `/verbs per-phase` for the current per-phase rotation.
 
 ### Example config
 
@@ -168,6 +169,12 @@ Or configure selected phases explicitly; unspecified phases are left unchanged. 
 /verbs thinking:claude tool:technical
 ```
 
+If you want the same verb choice to stick for the whole AI turn, use:
+
+```bash
+/verbs per-turn
+```
+
 ### Full-width rendering
 
 Visual animations (fire, plasma, matrix, starfield, aurora, neon-bounce) scale to fill the terminal width. Structural animations (pacman, pipeline, neural-pulse) keep a fixed size.
@@ -185,7 +192,14 @@ All animation + spinner settings are saved to `~/.pi/agent/extensions/pi-tui-ani
   "toolAnim": "fire3",
   "width": "full",
   "randomMode": false,
-  "enabled": true
+  "enabled": true,
+  "workingSpinner": {
+    "verbs": "none",
+    "verbRotationIntervalMs": 3000,
+    "verbSelectionMode": "per-phase",
+    "showCompletionVerb": true,
+    "completionVerbDurationMs": 2000
+  }
 }
 ```
 
