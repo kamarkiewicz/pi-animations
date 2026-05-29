@@ -1,8 +1,8 @@
 # pi-animations
 
-Animated thinking, working, and tool-execution indicators for [pi coding agent](https://github.com/badlogic/pi-mono), plus a configurable working spinner.
+Animated thinking, working, and tool-execution indicators for [pi coding agent](https://github.com/badlogic/pi-mono), plus a configurable working spinner and Claude-style verbs.
 
-Replace pi's default spinner with 21 terminal animations — from demoscene fire to Matrix rain to Pac-Man — and manage the inline spinner frames from the same extension.
+Replace pi's default spinner with 21 terminal animations — from demoscene fire to Matrix rain to Pac-Man — and manage the inline spinner frames/verbs from the same extension.
 
 ## Demo
 
@@ -57,7 +57,7 @@ Or via git:
 
 ## Usage
 
-Everything is under `/animation` and `/spinner`:
+Everything is under `/animation`, `/spinner`, and `/verbs`:
 
 ```
 /animation                          Show status, list all animations, and help
@@ -73,9 +73,11 @@ Everything is under `/animation` and `/spinner`:
 /animation on                       Enable animations
 /animation off                      Disable animations
 /spinner ...                        Frames: claude|braille|pulse|dot|star|none
+/verbs ...                          Verb presets: claude|short|technical|fun|none
+/verbs thinking:claude              Claude verbs only while thinking
 ```
 
-`/spinner` controls the loader icon.
+`/spinner` always controls the loader icon; `/verbs` is `none` by default, can show rotating Claude-style verbs when animations are off, and can supply animated labels for text animations. Verb presets can be set globally or per phase (`thinking:`, `working:`, `tool:`).
 
 ### Example config
 
@@ -146,13 +148,25 @@ Priority: **thinking > tool > working**. If the model is thinking while a tool r
 - **3-line animations** use `ctx.ui.setWidget()` to render a multi-line widget.
 - **Thinking label** patches `AssistantMessageComponent.updateContent()` to animate the collapsed "Thinking..." text in the message body.
 
-### Phase-aware text
+### Phase-aware text and verbs
 
 Animations that display text (glitch-text, crush, shimmer, orbit-dots) automatically adapt their label:
 
 - Thinking state → "Thinking..."
 - Working state → "Working..."
 - Tool state → "Running..."
+
+Verb labels are phase-aware too. For example, use Claude-style verbs only during thinking:
+
+```bash
+/verbs thinking:claude
+```
+
+Or configure selected phases explicitly; unspecified phases are left unchanged. With a fresh config they still use the global default (`none` out of the box):
+
+```bash
+/verbs thinking:claude tool:technical
+```
 
 ### Full-width rendering
 

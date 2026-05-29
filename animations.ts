@@ -13,7 +13,8 @@
  *   /animation tool:<name>      Set tool only
  *   /animation width full|default|<n>
  *   /animation on|off|random
- *   /spinner               Configure working spinner frames
+ *   /spinner /verbs        Spinner frames + phase-aware Claude verbs
+ *   /verbs thinking:claude Use verbs only for selected phase(s)
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
@@ -23,9 +24,14 @@ import { existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
 	FRAME_PRESETS,
+	VERB_PRESETS,
+	COMPLETION_VERBS,
+	randomItem,
 	formatFrames,
 	getFrameConfig,
+	getVerbList,
 	type FramePreset,
+	type VerbPreset,
 } from "./spinner-data.js";
 
 const rgb = (r: number, g: number, b: number) => `\x1b[38;2;${r};${g};${b}m`;
@@ -65,7 +71,13 @@ function lerpGrad(grad: number[][], t: number): [number, number, number] {
 const ellipsis = (f: number) => [".", "..", "...", ""][Math.floor(f / 10) % 4];
 
 type AnimPhase = "thinking" | "working" | "tool";
-type AnimationFn = (frame: number, width: number, phase?: AnimPhase) => string | string[];
+type AnimationFn = (frame: number, width: number, phase?: AnimPhase, label?: string) => string | string[];
+type VerbConfig = {
+	verbs: VerbPreset | "custom";
+	customVerbList?: string[];
+};
+
+const ANIM_PHASES: AnimPhase[] = ["thinking", "working", "tool"];
 
 const PHASE_LABELS: Record<AnimPhase, string> = {
 	thinking: "Thinking",
@@ -73,15 +85,23 @@ const PHASE_LABELS: Record<AnimPhase, string> = {
 	tool: "Running",
 };
 
-interface SpinnerConfig {
+interface SpinnerConfig extends VerbConfig {
 	frames: FramePreset | "custom";
 	customFrames?: string[];
 	frameIntervalMs: number;
+	phaseVerbs?: Partial<Record<AnimPhase, VerbConfig>>;
+	verbRotationIntervalMs: number;
+	showCompletionVerb: boolean;
+	completionVerbDurationMs: number;
 }
 
 const DEFAULT_SPINNER_CONFIG: SpinnerConfig = {
 	frames: "claude",
 	frameIntervalMs: 150,
+	verbs: "none",
+	verbRotationIntervalMs: 3000,
+	showCompletionVerb: true,
+	completionVerbDurationMs: 2000,
 };
 
 // ─── 02 Neural Pulse ─────────────────────────────────────────────
@@ -100,8 +120,8 @@ const neuralPulse: AnimationFn = (f, w) => {
 };
 
 // ─── 03 Glitch Text ──────────────────────────────────────────────
-const glitchText: AnimationFn = (f, _w, phase) => {
-	const text = PHASE_LABELS[phase || "thinking"];
+const glitchText: AnimationFn = (f, _w, phase, label) => {
+	const text = label || PHASE_LABELS[phase || "thinking"];
 	const glyphs = "█▓▒░╳╱╲¥£€$#@!?&%~*";
 	const colors = [rgb(0, 255, 200), rgb(255, 0, 100), rgb(100, 200, 255), rgb(255, 255, 0)];
 	let line = "";
@@ -294,15 +314,15 @@ const scrambleChars = "0123456789abcdefABCDEF~!@#$£€%^&*()+=_";
 const scrambleBirths = Array.from({ length: 15 }, () => Math.random() * 20);
 const scrambleRamp: number[][] = [];
 for (let i = 0; i < 24; i++) { const t = i / 24, a = t * Math.PI * 2; scrambleRamp.push([Math.round(Math.sin(a) * 127 + 128), Math.round(Math.sin(a + 2.094) * 80 + 80), Math.round(Math.sin(a + 4.189) * 127 + 128)]); }
-const crushScramble: AnimationFn = (f, _w, phase) => {
+const crushScramble: AnimationFn = (f, _w, phase, label) => {
 	const sw = 15, init = f > 20;
 	let line = "";
 	for (let i = 0; i < sw; i++) {
 		const ci = (i + (init ? f : 0)) % scrambleRamp.length, [r, g, b] = scrambleRamp[ci];
 		line += rgb(r, g, b) + (!init && f < scrambleBirths[i] ? "." : scrambleChars[Math.floor(Math.random() * scrambleChars.length)]);
 	}
-	const label = PHASE_LABELS[phase || "thinking"];
-	line += " " + rgb(200, 200, 200) + label;
+	const text = label || PHASE_LABELS[phase || "thinking"];
+	line += " " + rgb(200, 200, 200) + text;
 	if (init) line += rgb(200, 200, 200) + ellipsis(f);
 	return line + reset;
 };
@@ -329,8 +349,8 @@ const piLogoPulse: AnimationFn = (f) => {
 };
 
 // ─── 22 Shimmer Text ─────────────────────────────────────────────
-const shimmerText: AnimationFn = (f, _w, phase) => {
-	const text = PHASE_LABELS[phase || "thinking"] + "...";
+const shimmerText: AnimationFn = (f, _w, phase, label) => {
+	const text = (label || PHASE_LABELS[phase || "thinking"]) + "...";
 	const base = [200, 200, 200];
 	let line = "";
 	for (let i = 0; i < text.length; i++) {
@@ -369,7 +389,7 @@ const vibeTypewriter: AnimationFn = (f) => {
 
 // ─── 26 Orbit Dots ───────────────────────────────────────────────
 const dotChars = ["·", "∘", "○", "●", "◉", "●", "○", "∘"];
-const orbitDots: AnimationFn = (f, _w, phase) => {
+const orbitDots: AnimationFn = (f, _w, phase, label) => {
 	let line = "";
 	for (let i = 0; i < 5; i++) {
 		const phase = Math.sin(f * 0.12 - i * 0.8), norm = (phase + 1) / 2;
@@ -379,8 +399,8 @@ const orbitDots: AnimationFn = (f, _w, phase) => {
 		line += (norm > 0.7 ? bold : "") + rgb(Math.round(r * br), Math.round(g * br), Math.round(b * br)) + dotChars[ci] + nobold + " ";
 	}
 	const [lr, lg, lb] = lerpGrad(PI_GRAD, (f * 0.08 % PI_GRAD.length) / PI_GRAD.length);
-	const label = PHASE_LABELS[phase || "thinking"];
-	line += "  " + rgb(lr, lg, lb) + label + rgb(180, 180, 200) + ellipsis(f);
+	const text = label || PHASE_LABELS[phase || "thinking"];
+	line += "  " + rgb(lr, lg, lb) + text + rgb(180, 180, 200) + ellipsis(f);
 	return line + reset;
 };
 
@@ -603,12 +623,99 @@ function colorizeFrames(frames: string[], ctx: ExtensionContext): string[] {
 	return frames.map((f) => (f ? ctx.ui.theme.fg("accent", f) : f));
 }
 
+function getPhaseVerbConfig(config: SpinnerConfig, phase?: AnimPhase): VerbConfig {
+	return phase && config.phaseVerbs?.[phase] ? config.phaseVerbs[phase]! : config;
+}
+
+function buildVerbList(config: SpinnerConfig, phase?: AnimPhase): string[] {
+	const verbConfig = getPhaseVerbConfig(config, phase);
+	if (verbConfig.verbs === "custom" && verbConfig.customVerbList && verbConfig.customVerbList.length > 0) {
+		return verbConfig.customVerbList;
+	}
+	return getVerbList(verbConfig.verbs);
+}
+
 function describeFramePreset(config: SpinnerConfig): string {
 	if (config.frames === "custom") {
 		return `custom [${formatFrames(config.customFrames ?? [])}] @${config.frameIntervalMs}ms`;
 	}
 	const preset = FRAME_PRESETS[config.frames as FramePreset];
 	return `${config.frames} [${formatFrames(preset?.frames ?? [])}] @${preset?.intervalMs ?? config.frameIntervalMs}ms`;
+}
+
+function describeVerbConfig(config: VerbConfig): string {
+	if (config.verbs === "custom") {
+		return `custom (${config.customVerbList?.length ?? 0} verbs)`;
+	}
+	return `${config.verbs} (${(VERB_PRESETS[config.verbs as VerbPreset] ?? []).length} verbs)`;
+}
+
+function describeVerbPreset(config: SpinnerConfig): string {
+	const overrides = ANIM_PHASES
+		.filter((phase) => config.phaseVerbs?.[phase])
+		.map((phase) => `${phase}: ${describeVerbConfig(config.phaseVerbs![phase]!)}`);
+	const suffix = overrides.length > 0 ? `  |  ${overrides.join("  |  ")}` : "";
+	return `default: ${describeVerbConfig(config)}${suffix}`;
+}
+
+function hexToRgb(hex: string): [number, number, number] {
+	const h = hex.replace("#", "");
+	return [
+		parseInt(h.slice(0, 2), 16),
+		parseInt(h.slice(2, 4), 16),
+		parseInt(h.slice(4, 6), 16),
+	];
+}
+
+function blendColors(
+	c1: [number, number, number],
+	c2: [number, number, number],
+	t: number,
+): [number, number, number] {
+	return [
+		Math.round(c1[0] + (c2[0] - c1[0]) * t),
+		Math.round(c1[1] + (c2[1] - c1[1]) * t),
+		Math.round(c1[2] + (c2[2] - c1[2]) * t),
+	];
+}
+
+function lightenRgb(r: number, g: number, b: number, amount: number): [number, number, number] {
+	return [
+		Math.min(255, Math.round(r + (255 - r) * amount)),
+		Math.min(255, Math.round(g + (255 - g) * amount)),
+		Math.min(255, Math.round(b + (255 - b) * amount)),
+	];
+}
+
+function getThemeAccentHex(ctx: ExtensionContext): string | null {
+	const sample = ctx.ui.theme.fg("accent", "\u2588");
+	const match = sample.match(/\x1b\[38;2;(\d+);(\d+);(\d+)m/);
+	if (!match) return null;
+	const r = parseInt(match[1]!).toString(16).padStart(2, "0");
+	const g = parseInt(match[2]!).toString(16).padStart(2, "0");
+	const b = parseInt(match[3]!).toString(16).padStart(2, "0");
+	return `#${r}${g}${b}`;
+}
+
+function colorSweep(
+	text: string,
+	frame: number,
+	baseHex: string,
+	shimmerHex: string,
+): string {
+	const base = hexToRgb(baseHex);
+	const shimmer = hexToRgb(shimmerHex);
+	const totalWidth = text.length + 8;
+	const pos = frame % totalWidth;
+
+	let result = "";
+	for (let i = 0; i < text.length; i++) {
+		const dist = Math.abs(i - pos);
+		const t = Math.max(0, 1 - dist / 4);
+		const color = blendColors(base, shimmer, t);
+		result += `\x1b[38;2;${color[0]};${color[1]};${color[2]}m${text[i]}\x1b[0m`;
+	}
+	return result;
 }
 
 interface AnimState {
@@ -627,17 +734,69 @@ interface AnimState {
 	isToolRunning: boolean;
 	currentWorkingCtx: ExtensionContext | null;
 	spinner: SpinnerConfig;
+	spinnerTimer: ReturnType<typeof setInterval> | null;
+	spinnerShimmerTimer: ReturnType<typeof setInterval> | null;
+	spinnerCompletionTimer: ReturnType<typeof setTimeout> | null;
+	spinnerFrame: number;
 	spinnerCtx: ExtensionContext | null;
+	spinnerVerbList: string[];
+	spinnerVerbText: string;
+	spinnerVerbChangedAt: number;
+	spinnerVerbPhase: AnimPhase | null;
+	spinnerAccentHex: string | null;
+	spinnerShimmerHex: string | null;
+	spinnerFallbackActive: boolean;
 }
 
 function getState(): AnimState {
 	return (globalThis as any)[STATE_KEY];
 }
 
-function renderFrame(animName: string, frame: number, width: number, phase?: AnimPhase): string[] {
+function getCurrentPhase(state: AnimState): AnimPhase {
+	if (state.isThinking) return "thinking";
+	if (state.isToolRunning) return "tool";
+	return "working";
+}
+
+function resetSpinnerVerbRotation(state: AnimState): void {
+	state.spinnerVerbText = "";
+	state.spinnerVerbChangedAt = 0;
+	state.spinnerVerbPhase = null;
+}
+
+function refreshSpinnerVerbText(state: AnimState, phase: AnimPhase = getCurrentPhase(state)): string | undefined {
+	const verbs = buildVerbList(state.spinner, phase);
+	state.spinnerVerbList = verbs;
+	if (verbs.length === 0) {
+		// Do not let a phase with disabled verbs (e.g. thinking/tool:none)
+		// clear the verb selected for another phase. Pi can briefly bounce
+		// between phases while a single visible "working" operation is active;
+		// clearing here made working:claude pick a fresh verb on every bounce.
+		if (state.spinnerVerbPhase === phase) resetSpinnerVerbRotation(state);
+		return undefined;
+	}
+
+	const now = Date.now();
+	const interval = state.spinner.verbRotationIntervalMs;
+	const phaseChanged = state.spinnerVerbPhase !== phase;
+	if (!state.spinnerVerbText || phaseChanged || state.spinnerVerbChangedAt === 0 || (interval > 0 && now - state.spinnerVerbChangedAt >= interval)) {
+		state.spinnerVerbText = randomItem(verbs);
+		state.spinnerVerbChangedAt = now;
+		state.spinnerVerbPhase = phase;
+	}
+	return state.spinnerVerbText;
+}
+
+function getAnimationLabel(state: AnimState, animName: string, phase: AnimPhase): string | undefined {
+	const phaseOverride = Boolean(state.spinner.phaseVerbs?.[phase]);
+	if (animName !== "glitch-text" && !phaseOverride) return undefined;
+	return refreshSpinnerVerbText(state, phase);
+}
+
+function renderFrame(animName: string, frame: number, width: number, phase?: AnimPhase, label?: string): string[] {
 	const anim = getAnimation(animName);
 	if (!anim) return ["Working..."];
-	const result = anim.fn(frame, width, phase);
+	const result = anim.fn(frame, width, phase, label);
 	return Array.isArray(result) ? result : [result];
 }
 
@@ -672,7 +831,8 @@ function ensurePatch(): void {
 
 				// Render animated frame
 				const animName = state.randomMode ? pickRandom("thinking") : state.thinkingAnim;
-				child.setText(renderFrame(animName, state.frame, 60));
+				const label = getAnimationLabel(state, animName, "thinking");
+				child.setText(renderFrame(animName, state.frame, 60, "thinking", label));
 			}
 		} catch { /* never break rendering */ }
 	};
@@ -700,6 +860,17 @@ export default function (pi: ExtensionAPI) {
 			...(cfg.workingSpinner && typeof cfg.workingSpinner === "object" ? cfg.workingSpinner : {}),
 		},
 		spinnerCtx: null,
+		spinnerTimer: null,
+		spinnerShimmerTimer: null,
+		spinnerCompletionTimer: null,
+		spinnerFrame: 0,
+		spinnerVerbList: [],
+		spinnerVerbText: "",
+		spinnerVerbChangedAt: 0,
+		spinnerVerbPhase: null,
+		spinnerAccentHex: null,
+		spinnerShimmerHex: null,
+		spinnerFallbackActive: false,
 	};
 	(globalThis as any)[STATE_KEY] = state;
 	ensurePatch();
@@ -723,6 +894,83 @@ export default function (pi: ExtensionAPI) {
 		ctx.ui.setWorkingIndicator({ frames: colored, intervalMs: state.spinner.frameIntervalMs });
 	}
 
+	function rgbToHex([r, g, b]: [number, number, number]): string {
+		return `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`;
+	}
+
+	function updateSpinnerColors(ctx: ExtensionContext) {
+		const accent = getThemeAccentHex(ctx) ?? "#00ffff";
+		const shimmer = rgbToHex(lightenRgb(...hexToRgb(accent), 0.7));
+		state.spinnerAccentHex = accent;
+		state.spinnerShimmerHex = shimmer;
+	}
+
+	function renderSpinnerVerb(ctx: ExtensionContext) {
+		const text = refreshSpinnerVerbText(state, getCurrentPhase(state));
+		if (!text) {
+			ctx.ui.setWorkingMessage();
+			return;
+		}
+		const base = state.spinnerAccentHex ?? "#00ffff";
+		const shimmer = state.spinnerShimmerHex ?? "#ffffff";
+		ctx.ui.setWorkingMessage(colorSweep(`${text}…`, state.spinnerFrame, base, shimmer));
+	}
+
+	function cancelSpinnerCompletionTimer() {
+		if (state.spinnerCompletionTimer) {
+			clearTimeout(state.spinnerCompletionTimer);
+			state.spinnerCompletionTimer = null;
+		}
+	}
+
+	function startSpinnerFallback(ctx: ExtensionContext) {
+		stopSpinnerFallback();
+		cancelSpinnerCompletionTimer();
+		applySpinnerIndicator(ctx);
+		updateSpinnerColors(ctx);
+		state.spinnerCtx = ctx;
+		state.spinnerFallbackActive = true;
+		state.spinnerFrame = 0;
+		resetSpinnerVerbRotation(state);
+		renderSpinnerVerb(ctx);
+
+		state.spinnerTimer = setInterval(() => {
+			state.spinnerFrame++;
+			renderSpinnerVerb(ctx);
+		}, 80);
+	}
+
+	function stopSpinnerFallback() {
+		if (state.spinnerTimer) {
+			clearInterval(state.spinnerTimer);
+			state.spinnerTimer = null;
+		}
+		if (state.spinnerShimmerTimer) {
+			clearInterval(state.spinnerShimmerTimer);
+			state.spinnerShimmerTimer = null;
+		}
+		if (state.spinnerFallbackActive && state.spinnerCtx) {
+			state.spinnerCtx.ui.setWorkingMessage();
+		}
+		state.spinnerFallbackActive = false;
+		resetSpinnerVerbRotation(state);
+	}
+
+	function showSpinnerCompletionVerb(ctx: ExtensionContext): boolean {
+		cancelSpinnerCompletionTimer();
+		if (!state.spinner.showCompletionVerb || state.spinner.completionVerbDurationMs <= 0 || COMPLETION_VERBS.length === 0) {
+			return false;
+		}
+		updateSpinnerColors(ctx);
+		const text = `${randomItem(COMPLETION_VERBS)}.`;
+		ctx.ui.setWorkingMessage(colorSweep(text, state.spinnerFrame, state.spinnerAccentHex ?? "#00ffff", state.spinnerShimmerHex ?? "#ffffff"));
+		state.spinnerCompletionTimer = setTimeout(() => {
+			ctx.ui.setWorkingMessage();
+			state.spinnerCompletionTimer = null;
+		}, state.spinner.completionVerbDurationMs);
+		return true;
+	}
+
 	// ─── Working animation ───────────────────────────────────────
 	let lastAnimLines = 0; // track if we need to switch between message/widget
 
@@ -731,6 +979,7 @@ export default function (pi: ExtensionAPI) {
 		if (!state.enabled) return;
 		state.frame = 0;
 		state.currentWorkingCtx = ctx;
+		resetSpinnerVerbRotation(state);
 		lastAnimLines = 0;
 		const randomWorkingName = state.randomMode ? pickRandom("working") : null;
 		const randomThinkingName = state.randomMode ? pickRandom("thinking") : null;
@@ -751,7 +1000,8 @@ export default function (pi: ExtensionAPI) {
 				phase = "working";
 			}
 			const w = resolveWidth(state.width);
-			const lines = renderFrame(animName, state.frame, w, phase);
+			const label = getAnimationLabel(state, animName, phase);
+			const lines = renderFrame(animName, state.frame, w, phase, label);
 			if (lines.length === 1) {
 				// Single line: use setWorkingMessage (replaces Loader text)
 				if (lastAnimLines > 1) ctx.ui.setWidget("anim-multi", undefined);
@@ -784,7 +1034,8 @@ export default function (pi: ExtensionAPI) {
 		state.thinkingTimer = setInterval(() => {
 			state.frame++;
 			const animName = state.randomMode ? pickRandom("thinking") : state.thinkingAnim;
-			const lines = renderFrame(animName, state.frame, 60, "thinking");
+			const label = getAnimationLabel(state, animName, "thinking");
+			const lines = renderFrame(animName, state.frame, 60, "thinking", label);
 			for (const [, label] of state.thinkingLabels) {
 				// Thinking labels are always single-line Text components
 				label.setText(lines[0]);
@@ -803,17 +1054,21 @@ export default function (pi: ExtensionAPI) {
 	// ─── Events ──────────────────────────────────────────────────
 	pi.on("session_start", async (_e, ctx) => {
 		state.theme = ctx.ui.theme;
+		cancelSpinnerCompletionTimer();
 		applySpinnerIndicator(ctx);
+		stopSpinnerFallback();
 		ctx.ui.setWorkingMessage();
 	});
 
 	pi.on("agent_start", async (_e, ctx) => {
+		cancelSpinnerCompletionTimer();
 		applySpinnerIndicator(ctx);
 		if (state.enabled) {
+			stopSpinnerFallback();
 			startWorkingAnimation(ctx);
 		} else {
 			stopWorkingAnimation(ctx);
-			ctx.ui.setWorkingMessage();
+			startSpinnerFallback(ctx);
 		}
 	});
 
@@ -822,7 +1077,9 @@ export default function (pi: ExtensionAPI) {
 		state.isToolRunning = false;
 		stopWorkingAnimation(ctx);
 		stopThinkingTicker();
-		ctx.ui.setWorkingMessage(); // restore default
+		stopSpinnerFallback();
+		const showedCompletion = showSpinnerCompletionVerb(ctx);
+		if (!showedCompletion) ctx.ui.setWorkingMessage(); // restore default
 	});
 
 	pi.on("message_update", async (event, ctx) => {
@@ -859,12 +1116,15 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_switch", async (_e, ctx) => {
 		stopWorkingAnimation(ctx);
 		stopThinkingTicker();
+		stopSpinnerFallback();
 		ctx.ui.setWorkingMessage();
 	});
 
 	pi.on("session_shutdown", async () => {
 		stopWorkingAnimation();
 		stopThinkingTicker();
+		stopSpinnerFallback();
+		cancelSpinnerCompletionTimer();
 	});
 
 	// ─── Showcase (used by /animation showcase) ─────────────────
@@ -978,11 +1238,11 @@ export default function (pi: ExtensionAPI) {
 				const status = state.enabled
 					? `Working: ${state.workingAnim}  •  Thinking: ${state.thinkingAnim}  •  Tool: ${state.toolAnim}  •  Width: ${state.width}${state.randomMode ? "  •  (random)" : ""}`
 					: "Animations disabled";
-				const spinner = `Spinner: ${describeFramePreset(state.spinner)}`;
+				const spinner = `Spinner: ${describeFramePreset(state.spinner)}  •  Verbs: ${describeVerbPreset(state.spinner)}`;
 				const list = ANIMATIONS.map(a =>
 					`  ${a.name.padEnd(20)} [${a.category.padEnd(8)} ${a.lines}L] ${a.description}`
 				).join("\n");
-				ctx.ui.notify(`${status}\n${spinner}\n\nAnimations:\n${list}\n\nUsage:\n  /animation showcase          Browse & pick\n  /animation <name>            Set all states\n  /animation working:<name>    Set working only\n  /animation thinking:<name>   Set thinking only\n  /animation tool:<name>       Set tool only\n  /animation width full|default|<n>\n  /animation on|off|random\n  /spinner ...                 Manage spinner frames`, "info");
+				ctx.ui.notify(`${status}\n${spinner}\n\nAnimations:\n${list}\n\nUsage:\n  /animation showcase          Browse & pick\n  /animation <name>            Set all states\n  /animation working:<name>    Set working only\n  /animation thinking:<name>   Set thinking only\n  /animation tool:<name>       Set tool only\n  /animation width full|default|<n>\n  /animation on|off|random\n  /spinner ... /verbs ...      Manage spinner frames + Claude verbs`, "info");
 				return;
 			}
 
@@ -994,10 +1254,14 @@ export default function (pi: ExtensionAPI) {
 
 			// ── on/off/random ──
 			if (arg === "off") {
+				const wasActive = state.currentWorkingCtx !== null || state.workingTimer !== null;
+				const fallbackCtx = state.currentWorkingCtx ?? ctx;
 				state.enabled = false;
 				stopWorkingAnimation(ctx);
 				stopThinkingTicker();
+				stopSpinnerFallback();
 				ctx.ui.setWorkingMessage();
+				if (wasActive) startSpinnerFallback(fallbackCtx);
 				persistConfig();
 				ctx.ui.notify("Animations disabled", "info");
 				return;
@@ -1005,6 +1269,7 @@ export default function (pi: ExtensionAPI) {
 			if (arg === "on") {
 				state.enabled = true;
 				state.randomMode = false;
+				stopSpinnerFallback();
 				persistConfig();
 				ctx.ui.notify(`Animations enabled`, "info");
 				return;
@@ -1012,6 +1277,7 @@ export default function (pi: ExtensionAPI) {
 			if (arg === "random") {
 				state.enabled = true;
 				state.randomMode = true;
+				stopSpinnerFallback();
 				persistConfig();
 				ctx.ui.notify("Random mode enabled", "info");
 				return;
@@ -1056,6 +1322,7 @@ export default function (pi: ExtensionAPI) {
 
 			state.enabled = true;
 			state.randomMode = false;
+			stopSpinnerFallback();
 			if (target === "all" || target === "working") state.workingAnim = name;
 			if (target === "all" || target === "thinking") state.thinkingAnim = name;
 			if (target === "all" || target === "tool") state.toolAnim = name;
@@ -1068,7 +1335,7 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// ─── Spinner command ────────────────────────────────────────
+	// ─── Spinner / verbs commands ───────────────────────────────
 	pi.registerCommand("spinner", {
 		description: "Configure working spinner frames.",
 		getArgumentCompletions: (prefix: string) => {
@@ -1090,7 +1357,10 @@ export default function (pi: ExtensionAPI) {
 		handler: async (args, ctx) => {
 			const trimmed = args.trim();
 			if (!trimmed) {
-				ctx.ui.notify(`Frames: ${describeFramePreset(state.spinner)}`, "info");
+				ctx.ui.notify(
+					`Frames: ${describeFramePreset(state.spinner)}  |  ${describeVerbPreset(state.spinner)}`,
+					"info",
+				);
 				return;
 			}
 
@@ -1106,6 +1376,7 @@ export default function (pi: ExtensionAPI) {
 				state.spinner.frames = "custom";
 				state.spinner.customFrames = frameList;
 				applySpinnerIndicator(ctx);
+				if (!state.enabled && state.spinnerFallbackActive) startSpinnerFallback(state.spinnerCtx ?? ctx);
 				persistConfig();
 				ctx.ui.notify(`Custom frames set: ${formatFrames(frameList)}`, "success");
 				return;
@@ -1119,6 +1390,7 @@ export default function (pi: ExtensionAPI) {
 				}
 				state.spinner.frameIntervalMs = n;
 				applySpinnerIndicator(ctx);
+				if (!state.enabled && state.spinnerFallbackActive) startSpinnerFallback(state.spinnerCtx ?? ctx);
 				persistConfig();
 				ctx.ui.notify(`Frame interval set to ${n}ms`, "success");
 				return;
@@ -1131,6 +1403,7 @@ export default function (pi: ExtensionAPI) {
 				state.spinner.frameIntervalMs = FRAME_PRESETS[match].intervalMs;
 				delete state.spinner.customFrames;
 				applySpinnerIndicator(ctx);
+				if (!state.enabled && state.spinnerFallbackActive) startSpinnerFallback(state.spinnerCtx ?? ctx);
 				persistConfig();
 				const label = match === "none" ? "hidden" : match;
 				ctx.ui.notify(`Spinner frames: ${label}`, "success");
@@ -1144,4 +1417,121 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	pi.registerCommand("verbs", {
+		description: "Configure phase-aware spinner verbs.",
+		getArgumentCompletions: (prefix: string) => {
+			const presets: VerbPreset[] = ["claude", "short", "technical", "fun", "none"];
+			const phaseItems = ANIM_PHASES.flatMap((phase) => presets.map((preset) => ({
+				value: `${phase}:${preset}`,
+				label: `${phase}:${preset}`,
+				description: `Set ${phase} verbs to ${preset}`,
+			})));
+			const items = [
+				{ value: "claude", label: "claude", description: "Global default: 187 verbs (full Claude Code list)" },
+				{ value: "short", label: "short", description: "Global default: 6 focused verbs" },
+				{ value: "technical", label: "technical", description: "Global default: 12 dev-focused verbs" },
+				{ value: "fun", label: "fun", description: "Global default: 23 whimsical verbs" },
+				{ value: "none", label: "none", description: "Global default: no verb rotation" },
+				{ value: "clear", label: "clear", description: "Clear phase-specific verb overrides" },
+				{ value: "add ", label: "add", description: "Append custom default verbs v1,v2,..." },
+				{ value: "replace ", label: "replace", description: "Replace default verbs with custom v1,v2,..." },
+				...phaseItems,
+			];
+			const first = prefix.split(/\s+/)[0]?.toLowerCase() ?? "";
+			if (first === "add" || first === "replace") return null;
+			const filtered = prefix ? items.filter((i) => i.value.startsWith(prefix.toLowerCase())) : items;
+			return filtered.length > 0 ? filtered : null;
+		},
+		handler: async (args, ctx) => {
+			const trimmed = args.trim();
+			const validPresets: VerbPreset[] = ["claude", "short", "technical", "fun", "none"];
+			const isPhase = (value: string): value is AnimPhase => ANIM_PHASES.includes(value as AnimPhase);
+			const isPreset = (value: string): value is VerbPreset => validPresets.includes(value as VerbPreset);
+			const parsePhasePreset = (token: string): { phase: AnimPhase; preset: VerbPreset } | null => {
+				const [phase, preset, ...rest] = token.toLowerCase().split(":");
+				if (rest.length > 0 || !phase || !preset || !isPhase(phase) || !isPreset(preset)) return null;
+				return { phase, preset };
+			};
+			const setPhasePreset = (phase: AnimPhase, preset: VerbPreset) => {
+				state.spinner.phaseVerbs ??= {};
+				state.spinner.phaseVerbs[phase] = { verbs: preset };
+			};
+			const resetAndPersist = () => {
+				resetSpinnerVerbRotation(state);
+				if (!state.enabled && state.spinnerFallbackActive) startSpinnerFallback(state.spinnerCtx ?? ctx);
+				persistConfig();
+			};
+			const presetLabel = (preset: VerbPreset) => preset === "none" ? "no verb rotation" : `${preset} (${VERB_PRESETS[preset].length} verbs)`;
+
+			if (!trimmed) {
+				const list = buildVerbList(state.spinner);
+				ctx.ui.notify(
+					`Verbs: ${describeVerbPreset(state.spinner)}  | default first few: ${list.slice(0, 5).join(", ")}${
+						list.length > 5 ? ", ..." : ""
+					}`,
+					"info",
+				);
+				return;
+			}
+
+			const parts = trimmed.split(/\s+/);
+			const sub = parts[0]!.toLowerCase();
+
+			if (sub === "clear") {
+				delete state.spinner.phaseVerbs;
+				resetAndPersist();
+				ctx.ui.notify("Phase-specific verb overrides cleared", "success");
+				return;
+			}
+
+			const phasePresets = parts.map(parsePhasePreset);
+			if (phasePresets.every(Boolean)) {
+				for (const item of phasePresets) setPhasePreset(item!.phase, item!.preset);
+				resetAndPersist();
+				ctx.ui.notify(`Verb presets: ${phasePresets.map((item) => `${item!.phase}=${item!.preset}`).join(", ")} (other phases unchanged)`, "success");
+				return;
+			}
+
+			if (sub === "add" && parts.length > 1) {
+				const extra = parts.slice(1).join("").split(",").map((s) => s.trim()).filter(Boolean);
+				if (extra.length === 0) {
+					ctx.ui.notify("Usage: /verbs add v1,v2,v3,...", "error");
+					return;
+				}
+				const current = buildVerbList(state.spinner);
+				state.spinner.verbs = "custom";
+				state.spinner.customVerbList = [...current, ...extra];
+				resetAndPersist();
+				ctx.ui.notify(`Appended ${extra.length} default verbs (total: ${state.spinner.customVerbList.length})`, "success");
+				return;
+			}
+
+			if (sub === "replace" && parts.length > 1) {
+				const list = parts.slice(1).join("").split(",").map((s) => s.trim()).filter(Boolean);
+				if (list.length === 0) {
+					ctx.ui.notify("Usage: /verbs replace v1,v2,v3,...", "error");
+					return;
+				}
+				state.spinner.verbs = "custom";
+				state.spinner.customVerbList = list;
+				resetAndPersist();
+				ctx.ui.notify(`Replaced default verbs with ${list.length} custom verbs`, "success");
+				return;
+			}
+
+			const match = validPresets.find((p) => p === sub);
+			if (match) {
+				state.spinner.verbs = match;
+				delete state.spinner.customVerbList;
+				resetAndPersist();
+				ctx.ui.notify(`Default verb preset: ${presetLabel(match)}`, "success");
+				return;
+			}
+
+			ctx.ui.notify(
+				"Usage: /verbs [claude|short|technical|fun|none|thinking:claude|working:none|tool:technical|clear|add v1,v2,...|replace v1,v2,...]",
+				"error",
+			);
+		},
+	});
 }

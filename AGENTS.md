@@ -4,7 +4,7 @@ Animated thinking/working/tool indicators for pi coding agent.
 
 ## Structure
 
-- `animations.ts` — integrated extension: 21 animations + `/animation` + `/spinner` commands + AssistantMessageComponent patch
+- `animations.ts` — integrated extension: 21 animations + `/animation` + `/spinner` + `/verbs` commands + AssistantMessageComponent patch
 - `explorations/` — standalone demos (`bun run explorations/XX-name.ts`)
 - `tmux-demo.sh` — launch all demos in tmux
 
@@ -15,6 +15,7 @@ pi -e ./animations.ts
 /animation showcase    # browse all
 /animation fire3       # set all states
 /spinner claude        # Claude spinner frames
+/verbs claude          # Claude verb rotation
 ```
 
 ## Architecture
